@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+﻿import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SessionService } from '../session/session.service';
@@ -6,6 +6,7 @@ import { SendTextMessageDto, SendMediaMessageDto, MessageResponseDto } from './d
 import { MediaInput } from '../../engine/interfaces/whatsapp-engine.interface';
 import { Message, MessageDirection, MessageStatus } from './entities/message.entity';
 import { HookManager } from '../../core/hooks';
+import { WebhookService } from '../webhook/webhook.service';
 
 export interface GetMessagesOptions {
   chatId?: string;
@@ -20,10 +21,10 @@ export class MessageService {
     private readonly messageRepository: Repository<Message>,
     private readonly sessionService: SessionService,
     private readonly hookManager: HookManager,
+    private readonly webhookService: WebhookService,
   ) {}
 
   async sendText(sessionId: string, dto: SendTextMessageDto): Promise<MessageResponseDto> {
-    // Execute hook before sending - plugins can modify or block
     const { continue: shouldContinue, data: hookData } = await this.hookManager.execute(
       'message:sending',
       { sessionId, input: dto, type: 'text' },
@@ -34,28 +35,36 @@ export class MessageService {
       throw new BadRequestException('Message sending blocked by plugin');
     }
 
-    // Use potentially modified input
     const finalDto = (hookData as { input: SendTextMessageDto }).input;
-
     const engine = this.getEngine(sessionId);
 
-    // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
       chatId: finalDto.chatId,
       body: finalDto.text,
       type: 'text',
+      metadata: finalDto.metadata,
     });
 
     try {
       const result = await engine.sendTextMessage(finalDto.chatId, finalDto.text);
 
-      // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
       message.status = MessageStatus.SENT;
       message.timestamp = result.timestamp;
       await this.messageRepository.save(message);
 
-      // Execute hook after successful send
+      void this.webhookService.dispatch(sessionId, 'message.sent', {
+        gatewayMessageRowId: message.id,
+        messageId: result.id,
+        waMessageId: result.id,
+        chatId: finalDto.chatId,
+        status: 'sent',
+        timestamp: result.timestamp,
+        metadata: finalDto.metadata ?? {},
+      }).catch(error => {
+        console.error('message.sent webhook dispatch failed', error);
+      });
+
       await this.hookManager.execute(
         'message:sent',
         { sessionId, result, input: finalDto },
@@ -67,11 +76,21 @@ export class MessageService {
         timestamp: result.timestamp,
       };
     } catch (error) {
-      // Mark as failed
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
 
-      // Execute hook on failure
+      void this.webhookService.dispatch(sessionId, 'message.failed', {
+        gatewayMessageRowId: message.id,
+        messageId: message.waMessageId ?? message.id,
+        waMessageId: message.waMessageId,
+        chatId: finalDto.chatId,
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+        metadata: finalDto.metadata ?? {},
+      }).catch(error => {
+        console.error('message.failed webhook dispatch failed', error);
+      });
+
       await this.hookManager.execute(
         'message:failed',
         { sessionId, error: error instanceof Error ? error.message : String(error), input: finalDto },
@@ -81,7 +100,6 @@ export class MessageService {
       throw error;
     }
   }
-
   async sendImage(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
     const media = this.buildMediaInput(dto);
@@ -240,7 +258,7 @@ export class MessageService {
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
       chatId: dto.chatId,
-      body: `📍 ${dto.description || 'Location'}`,
+      body: `ðŸ“ ${dto.description || 'Location'}`,
       type: 'location',
     });
 
@@ -278,7 +296,7 @@ export class MessageService {
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
       chatId: dto.chatId,
-      body: `📇 ${dto.contactName}`,
+      body: `ðŸ“‡ ${dto.contactName}`,
       type: 'contact',
     });
 
@@ -426,6 +444,7 @@ export class MessageService {
       type: string;
       timestamp?: number;
       status?: MessageStatus;
+      metadata?: Record<string, unknown>;
     },
   ): Promise<Message> {
     const session = await this.sessionService.findOne(sessionId);
@@ -440,6 +459,7 @@ export class MessageService {
       direction: MessageDirection.OUTGOING,
       timestamp: data.timestamp,
       status: data.status ?? MessageStatus.PENDING,
+      metadata: data.metadata,
     });
     return this.messageRepository.save(message);
   }
@@ -491,3 +511,4 @@ export class MessageService {
     };
   }
 }
+

@@ -1,5 +1,5 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNotEmpty, IsOptional, MaxLength, IsUrl, ValidateIf } from 'class-validator';
+﻿import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsString, IsNotEmpty, IsOptional, MaxLength, IsUrl, ValidateIf, IsObject } from 'class-validator';
 
 export class SendTextMessageDto {
   @ApiProperty({
@@ -19,6 +19,14 @@ export class SendTextMessageDto {
   @IsNotEmpty()
   @MaxLength(4096)
   text: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional metadata returned in webhooks, e.g. SMS log reference',
+    example: { source: 'school-management-system', sms_log_id: 123, student_id: 456, message_type: 'fee_reminder' },
+  })
+  @IsOptional()
+  @IsObject()
+  metadata?: Record<string, unknown>;
 }
 
 export class SendMediaMessageDto {
@@ -82,3 +90,4 @@ export class MessageResponseDto {
   @ApiProperty({ example: 1706868000 })
   timestamp: number;
 }
+
